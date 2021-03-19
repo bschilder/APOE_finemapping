@@ -1,0 +1,124 @@
+---
+title: "APOE_finemapping" 
+author: "Brian M. Schilder"
+date: "Most recent update:<br> `r Sys.Date()`"
+output: 
+  rmarkdown::html_document: 
+    theme: spacelab
+    highlight: zenburn 
+    code_folding: show 
+    toc: true 
+    toc_float: true
+    smooth_scroll: true
+    number_sections: false 
+    self_contained: true
+---
+
+```{r setup, include=T, message=F, dpi=300}
+knitr::opts_chunk$set(echo = T, root.dir="~/Desktop/APOE_finemapping")
+knitr::opts_knit$set(root.dir="~/Desktop/APOE_finemapping")
+
+library(dplyr)
+library(ggplot2)
+
+library(echolocatoR)
+```
+
+# Import fine-mapping results
+
+## Query fine-mapping portal
+
+Download Alzheimer's Disease GWAS fine-mapping results for the APOE locus via the [echolocatoR Fine-mapping Portal](https://rajlab.shinyapps.io/Fine_Mapping_Shiny/) API.
+
+```{r}
+local_finemap <- echolocatoR::GITHUB.portal_query(dataset_types = "GWAS", 
+                                                 phenotypes = "Alzheimer", 
+                                                 LD_panels = c("UKB", "1KGphase3"),
+                                                 loci = "APOE", 
+                                                 file_types = "multi_finemap", 
+                                                 results_dir = "./data", 
+                                                 overwrite = F)
+
+```
+
+## Merge fine-mapping results
+
+```{r}
+
+finemap_dat <- lapply(local_finemap,function(x){
+  dataset <- basename(dirname(dirname(dirname(x))))
+  LD_ref <- stringr::str_split(basename(x),pattern = "[.]")[[1]][2]
+  printer("Importing",dataset)
+  dat <- data.table::fread(x) 
+  cbind(dataset=dataset, 
+        LD_ref=LD_ref, 
+        dat)
+}) %>% data.table::rbindlist()
+
+
+```
+
+### Identify credible sets
+
+Show just the Union Credible Set SNPs (SNPs nominated by at least 1/4 fine-mapping tools).
+
+```{r}
+ucs_snps <- subset(finemap_dat, Support>0)
+createDT(ucs_snps)
+```
+
+### Identify Consensus SNPs
+
+Filter to just the consensus SNPs (SNPs nominated by 2 or more fine-mapping tools).
+
+```{r}
+consensus_snps <- subset(finemap_dat, Consensus_SNP==T)
+createDT(consensus_snps)
+```
+
+# Cell-type-specific annotations
+
+## Epigenomic peak overlap
+
+```{r Epigenomic peak overlap, warning=F, message=F, fig.height=4, fig.width=10}
+
+finemap_dat$Gene<- finemap_dat$Locus
+finemap_dat$Locus <- paste(finemap_dat$Locus,finemap_dat$dataset,sep="_")
+plot_res <- echolocatoR::SUMMARISE.peak_overlap_plot(merged_DT = finemap_dat,
+                                                     snp_filter = "Support>0",
+                                                     include.NOTT_2019_peaks = T,
+                                        include.NOTT_2019_enhancers_promoters = T,
+                                        include.NOTT_2019_PLACseq = T,
+                                        include.CORCES_2020_scATACpeaks = T,
+                                        include.CORCES_2020_Cicero_coaccess = T,
+                                        include.CORCES_2020_bulkATACpeaks = T,
+                                        include.CORCES_2020_HiChIP_FitHiChIP_coaccess = T,
+                                      include.CORCES_2020_gene_annotations = T,
+                                      plot_celltype_specificity = T,
+                                      plot_celltype_specificity_genes = T)
+
+```
+
+## Show the epigenomic overlap results
+
+```{r}
+createDT(plot_res$data)
+```
+
+## Summarise assay counts
+
+Summarise the number of assays in which at least one UCS SNP overlapped with a cell-type-specific epigenomic peak.
+
+```{r}
+celltype_counts <- plot_res$data %>% 
+  dplyr::group_by(Locus, Cell_type) %>%
+  dplyr::summarise(Count=sum(Count,na.rm = T)) %>%
+  dplyr::arrange(Locus, desc(Count))
+createDT(celltype_counts)
+```
+
+# Session info 
+
+```{r Session Info, attr.output='style="max-height: 400px;"'}
+sessioninfo::session_info()
+```
