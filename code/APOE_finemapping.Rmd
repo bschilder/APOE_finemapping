@@ -117,7 +117,240 @@ celltype_counts <- plot_res$data %>%
 createDT(celltype_counts)
 ```
 
-# Session info 
+## SNP-level results
+
+The above reports are useful to see thing in aggregate, but here we look at the SNP-level results.
+
+```{r}
+gr.hits <- SUMMARISE.peak_overlap(merged_DT=finemap_dat,
+                                   snp_filter="Support>0",
+                                   include.NOTT_2019_peaks=T,
+                                   include.NOTT_2019_enhancers_promoters=T,
+                                   include.NOTT_2019_PLACseq=T,
+                                   include.CORCES_2020_scATACpeaks=T,
+                                   include.CORCES_2020_Cicero_coaccess=T,
+                                   include.CORCES_2020_bulkATACpeaks=T,
+                                   include.CORCES_2020_HiChIP_FitHiChIP_coaccess=T,
+                                   include.CORCES_2020_gene_annotations=T)
+```
+
+```{r}
+snp_overlap_counts <- data.frame(gr.hits) %>%   
+  dplyr::group_by(Locus, SNP, Cell_type, Consensus_SNP, Support) %>%
+  dplyr::summarise(Assay_count=n()) %>%
+   dplyr::arrange(desc(Consensus_SNP), desc(Support), desc(Assay_count))
+createDT(snp_overlap_counts)
+```
+
+# Colocalization
+
+Import colocalization results from MiGA preprint:
+
+> Atlas of genetic effects in human microglia transcriptome across brain regions, aging and disease pathologies
+>
+> Katia de Paiva Lopes, Gijsje J. L. Snijders, Jack Humphrey, Amanda Allan, Marjolein Sneeboer, Elisa Navarro, Brian M. Schilder, Ricardo A. Vialle, Madison Parks, Roy Missall, Welmoed van Zuiden, Frederieke Gigase, Raphael Kübler, Amber Berdenis van Berlekom, Chotima Böttcher, Josef Priller, René S. Kahn, Lot D. de Witte, Towfique Raj
+>
+> bioRxiv 2020.10.27.356113; doi: <https://doi.org/10.1101/2020.10.27.356113>
+
+## AD coloc results: all loci
+
+```{r}
+coloc_res <- data.table::fread(here::here("data/MiGA/all_COLOC_results.Microglia_all_regions.snp-level.leadSNP.PPH4_filtered.tsv.gz"))
+
+meta <- echolocatoR::GITHUB.portal_metadata()
+
+AD_studies <- subset(meta, phenotype=="Alzheimer's Disease")$dataset
+coloc_AD <- subset(coloc_res, Study %in% AD_studies)
+dim(coloc_AD)
+createDT(coloc_AD)
+```
+
+## AD coloc results: APOE locus
+
+No genes in microglia eQTL are colocalized with the APOE locus in AD GWAS at PP.H4\>0.8.
+
+```{r}
+subset(coloc_AD, Locus=="APOE")
+```
+
+Let's instead ask what the top colocalized gene in the APOE locus is per study.
+
+Using this approach, the top eQTL gene is FKRP.
+
+```{r}
+coloc_res <- data.table::fread(here::here("data/MiGA/all_COLOC_results.Microglia_all_regions.snp-level.leadSNP.tsv.gz"))
+top_coloc <- subset(coloc_res, Study %in% AD_studies & Locus=="APOE") %>%
+  dplyr::group_by(Study, Locus) %>%
+  dplyr::slice_max(SNP.PP.H4, n = 1)
+createDT(top_coloc)
+```
+
+## CatalogueR
+
+Microglia do seem to be quite important in AD, but the microglia-specific QTL studies are currently available are underpowered. Let's take a different strategy and query the eQTL Catalogue via catalogueR.
+
+```{r, message=F}
+library(catalogueR)
+```
+
+### Jansen_2018
+
+```{r, eval=F}
+gwas.qtl_paths.Jansen_2018 <- catalogueR::eQTL_Catalogue.query(sumstats_paths = local_finemap[1], 
+                                 output_dir = "data/catalogueR_queries_Jansen_2018", 
+                                 split_files = T,
+                                 qtl_search = c("brain","monocyte","macrophage"),
+                                 conda_env ="echoR", 
+                                 nThread = 10)
+```
+
+### Marioni_2018
+
+```{r, eval=F}
+
+gwas.qtl_paths.Marioni_2018 <- catalogueR::eQTL_Catalogue.query(sumstats_paths = local_finemap[2], 
+                                 output_dir = "data/catalogueR_queries_Marioni_2018", 
+                                 split_files = T,
+                                 qtl_search = c("brain","monocyte","macrophage"),
+                                 conda_env ="echoR", 
+                                 force_new_subset = F,
+                                 nThread = 10)
+```
+
+## Run coloc
+
+#### Get sample sizes
+
+```{r}
+local_meta <- "data/GWAS-QTL_data_dictionary.xlsx"
+if(!file.exists(local_meta)){
+  download.file("https://github.com/RajLabMSSM/Fine_Mapping_Shiny/raw/master/www/metadata/GWAS-QTL_data_dictionary.xlsx",destfile = local_meta)
+}
+meta2 <- xlsx::read.xlsx2(here::here("data/GWAS-QTL_data_dictionary.xlsx"), sheetName = "GWAS")
+meta2$N <- as.numeric(meta2$N)
+```
+
+### Jansen_2018
+
+```{r, eval=F}
+# Gather paths
+gwas.qtl_paths.Jansen_2018 <- list.files("data/catalogueR_queries_Jansen_2018/",
+                                         pattern = ".tsv.gz",
+                                         recursive = T, full.names = T) 
+
+coloc_QTLs.Jansen_2018 <- catalogueR::run_coloc(gwas.qtl_paths = gwas.qtl_paths.Jansen_2018, 
+                      save_path = "data/catalogueR_queries_Jansen_2018/coloc.Jansen_2018.tsv.gz", 
+                      gwas_sample_size = subset(meta2, dataset=="Jansen_2018")$N,
+                      nThread = 10)
+```
+
+### Marioni_2018
+
+```{r, eval=F}
+# Gather paths
+gwas.qtl_paths.Marioni_2018 <- list.files("data/catalogueR_queries_Marioni_2018/",
+                                         pattern = ".tsv.gz",
+                                         recursive = T, full.names = T) 
+
+coloc_QTLs.Marioni_2018 <- catalogueR::run_coloc(gwas.qtl_paths = gwas.qtl_paths.Marioni_2018, 
+                      save_path = "data/catalogueR_queries_Marioni_2018/coloc.Jansen_2018.tsv.gz", 
+                      gwas_sample_size = subset(meta2, dataset=="Marioni_2018")$N,
+                      nThread = 10)
+ 
+```
+
+### Merge results
+
+```{r}
+coloc_QTLs.Jansen_2018 <- data.table::fread(here::here("data/catalogueR_queries_Jansen_2018/coloc.Jansen_2018.tsv.gz"), nThread = 10)
+coloc_QTLs.Marioni_2018 <- data.table::fread(here::here("data/catalogueR_queries_Marioni_2018/coloc.Marioni_2018.tsv.gz"), nThread = 10)
+
+coloc_res <- rbind(cbind(dataset="Jansen_2018",
+                         coloc_QTLs.Jansen_2018),
+                   cbind(dataset="Marioni_2018",
+                         coloc_QTLs.Marioni_2018), fill=T)
+
+top_coloc <- coloc_res %>% 
+   dplyr::select(dataset, Locus.GWAS, PP.H4, snp, SNP.PP.H4, qtl_id, gene.QTL) %>%
+  unique() %>%
+  subset(PP.H4>0.5) %>%
+  dplyr::group_by(dataset, Locus.GWAS, snp) %>% 
+  dplyr::slice_max(order_by = PP.H4, n=3 )
+createDT(top_coloc)
+```
+
+# Fine-mapped QTLs
+
+The eQTL Catalogue team recently fine-mapped their entire database (using the tool FINEMAP). We can check for overlap between causal variants here.
+
+Problem : None of the Consensus or Support\>0 SNPs seem to be present in the eQTL Catalogue fine-mapping data (filtering choices before fine-mapping?). Thus, this approach isn't very helpful in this case.
+
+```{r message=F}
+library(GenomicRanges)
+```
+
+```{r}
+ftp_path <- file.path("ftp://ftp.ebi.ac.uk/pub/databases/spot/eQTL/credible_sets",
+                      "BLUEPRINT_SE.monocyte_ge.purity_filtered.txt.gz"
+          # "GTEx.brain_cortex_ge.purity_filtered.txt.gz"
+          )
+ftp_cs <- data.table::fread(ftp_path, nThread = 10)
+gr.cs <- subset(ftp_cs, pip>0) %>%
+  GenomicRanges::makeGRangesFromDataFrame(keep.extra.columns = T, 
+                                          seqnames.field = "chr", 
+                                          start.field = "pos", end.field = "pos") 
+# catalogueR:::rsids_from_coords(gr.cs, genome_build = "hg38")
+gr.finemap <- catalogueR::liftover(gwas_data = finemap_dat,
+                                     build.conversion = "hg19.to.hg38")
+suppressWarnings(GenomeInfoDb::seqlevelsStyle(gr.finemap) <- "NCBI")
+
+
+#### Find any eQTL Catalogue CS within the range ####
+gr.range <- subset(gr.cs, 
+       (seqnames(gr.cs)==19) & 
+       (start(gr.cs)>=min(start(gr.finemap))) &
+       (end(gr.cs)<=max(start(gr.finemap))))
+gene_dict <- catalogueR::ensembl_to_hgnc(gr.range$phenotype_id)
+gr.range$gene <- gene_dict[gr.range$phenotype_id]
+
+
+#### Find overlap in causal SNPs ####
+gr.hits <- echolocatoR::GRanges_overlap(gr.finemap, gr.cs)
+gene_dict <- catalogueR::ensembl_to_hgnc(gr.hits$phenotype_id)
+gr.hits$gene <- gene_dict[gr.hits$phenotype_id]
+```
+
+# Summarise
+
+-   Merge the nominated cell-types (from epigenomic overlap) with the nominated genes (from colocalization) by SNPs.
+
+-   Top candidates:
+
+    -   Cell-type: microglia
+
+    -   Gene: FOSB
+
+    -   SNP: rs11556505
+
+-   [rs11556505](https://www.snpedia.com/index.php/Rs11556505) has previously been linked to AD and hippocampal degradation.
+
+-   This SNP falls within an exon of [TOMM40](https://www.ncbi.nlm.nih.gov/snp/rs11556505), which is a gene immediately next to APOE.
+
+-   Colocalization analyses nominated FOSB instead, which is \~500Mb+ downstream of TOMM40.
+
+-   and was shown to be somewhat correlated with HC volume and free-recall memory in humans. However they attributed the effect of rs11556505 to TOMM40.
+
+    > The influence of APOE and TOMM40 polymorphisms on hippocampal volume and episodic memory in old age, <https://www.frontiersin.org/articles/10.3389/fnhum.2013.00198/full>
+
+```{r}
+candidates <- merge(snp_overlap_counts,  
+                    top_coloc,  
+                    all.y = T,
+                    by.x = "SNP", by.y = "snp")
+createDT(candidates) 
+```
+
+# Session info
 
 ```{r Session Info, attr.output='style="max-height: 400px;"'}
 sessioninfo::session_info()
