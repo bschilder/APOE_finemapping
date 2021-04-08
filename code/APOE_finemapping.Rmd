@@ -15,8 +15,9 @@ output:
 ---
 
 ```{r setup, include=T, message=F, dpi=300}
-knitr::opts_chunk$set(echo = T, root.dir="~/Desktop/APOE_finemapping")
-knitr::opts_knit$set(root.dir="~/Desktop/APOE_finemapping")
+root.dir <- here::here()
+knitr::opts_chunk$set(echo = T, root.dir=root.dir)
+knitr::opts_knit$set(root.dir=root.dir)
 
 library(dplyr)
 library(ggplot2)
@@ -121,8 +122,12 @@ createDT(celltype_counts)
 
 The above reports are useful to see thing in aggregate, but here we look at the SNP-level results.
 
+- First, we extract cell-type-specific regulatory elements identified in either Nott et al. 2019 or Corces et al. 2020, that overlap with fine-mapped union credible set SNPs (Support>0).   
+
+- Next, we separately extract cell-type-specific interactome anchors that overlap with those regulatory elements. These can be used to link a given regulatory element (e.g. enhancer) to a specific gene (or set of genes) that it affects. 
+
 ```{r}
-gr.hits <- SUMMARISE.peak_overlap(merged_DT=finemap_dat,
+gr.gre <- SUMMARISE.peak_overlap(merged_DT=finemap_dat,
                                    snp_filter="Support>0",
                                    include.NOTT_2019_peaks=T,
                                    include.NOTT_2019_enhancers_promoters=T,
@@ -131,227 +136,164 @@ gr.hits <- SUMMARISE.peak_overlap(merged_DT=finemap_dat,
                                    include.CORCES_2020_Cicero_coaccess=T,
                                    include.CORCES_2020_bulkATACpeaks=T,
                                    include.CORCES_2020_HiChIP_FitHiChIP_coaccess=T,
-                                   include.CORCES_2020_gene_annotations=T)
+                                   include.CORCES_2020_gene_annotations=T)  
+gr.elements <- subset(gr.gre, !Assay %in% c("HiChIP_FitHiChIP","PLAC"))
+non_na_cols <- colnames(gr.elements@elementMetadata)[colSums(!is.na(gr.elements@elementMetadata))>0]
+
+gr.anchors <- subset(gr.gre, Assay %in% c("HiChIP_FitHiChIP","PLAC"))
+
+gr.hits <- clean_granges(GRanges_overlap(GenomicRanges::granges(gr.anchors), 
+                                         gr.elements[,non_na_cols],
+                                         return_merged = F, verbose = T))
+gr.hits$width <- GenomicRanges::width(gr.hits)
+unique(gr.elements$Assay)
+unique(gr.elements$dataset)
 ```
 
 ```{r}
 snp_overlap_counts <- data.frame(gr.hits) %>%   
   dplyr::group_by(Locus, SNP, Cell_type, Consensus_SNP, Support) %>%
-  dplyr::summarise(Assay_count=n()) %>%
+  dplyr::summarise(Assay_count=dplyr::n_distinct(Assay)) %>%
    dplyr::arrange(desc(Consensus_SNP), desc(Support), desc(Assay_count))
 createDT(snp_overlap_counts)
 ```
 
-# Colocalization
+## Gene annotation
 
-Import colocalization results from MiGA preprint:
+Now that we have the hits between fine-mapped SNPs and cell-type-specific regulatory elements, we can try linking those regulatory elements to specific genes.
 
-> Atlas of genetic effects in human microglia transcriptome across brain regions, aging and disease pathologies
->
-> Katia de Paiva Lopes, Gijsje J. L. Snijders, Jack Humphrey, Amanda Allan, Marjolein Sneeboer, Elisa Navarro, Brian M. Schilder, Ricardo A. Vialle, Madison Parks, Roy Missall, Welmoed van Zuiden, Frederieke Gigase, Raphael Kübler, Amber Berdenis van Berlekom, Chotima Böttcher, Josef Priller, René S. Kahn, Lot D. de Witte, Towfique Raj
->
-> bioRxiv 2020.10.27.356113; doi: <https://doi.org/10.1101/2020.10.27.356113>
+### Fine-mapped SNP overlap with promoters
 
-## AD coloc results: all loci
+Find fine-mapped SNPs that fall within regulatory elements (TTS, intron, promoter, promoter-TSS) connected to specific genes (active in one, some, or all cell-types).
 
 ```{r}
-coloc_res <- data.table::fread(here::here("data/MiGA/all_COLOC_results.Microglia_all_regions.snp-level.leadSNP.PPH4_filtered.tsv.gz"))
+promoters_all <-  echolocatoR::NOTT_2019.interactome$H3K4me3_around_TSS_annotated_pe
 
-meta <- echolocatoR::GITHUB.portal_metadata()
-
-AD_studies <- subset(meta, phenotype=="Alzheimer's Disease")$dataset
-coloc_AD <- subset(coloc_res, Study %in% AD_studies)
-dim(coloc_AD)
-createDT(coloc_AD)
+gr.promoters <- GenomicRanges::makeGRangesFromDataFrame(promoters_all,
+                                                        seqnames.field = "chr", 
+                                                        start.field = "start", 
+                                                        end.field = "end", 
+                                                        keep.extra.columns = T) 
+gr.overlap1 <- clean_granges(GRanges_overlap(gr.hits, gr.promoters))
+gr.overlap1$Assay <- "interactome_H3K4me3_around_TSS"
+gr.overlap1$Element_old <- gr.overlap1$Element
+gr.overlap1$Element <- stringr::str_split(gr.overlap1$Annotation," ", simplify = T)[,1]
 ```
 
-## AD coloc results: APOE locus
+### Fine-mapped SNP overlap with enhancers linked to promoters
 
-No genes in microglia eQTL are colocalized with the APOE locus in AD GWAS at PP.H4\>0.8.
+Find fine-mapped SNPs that fall within *enhancers, superenhancers or promoters* that interact with promoters (active in one, some or all cell-types).
 
 ```{r}
-subset(coloc_AD, Locus=="APOE")
+range_cols <- grep("interactions$", colnames(promoters_all), value = T)
+print(paste(length(range_cols),"interacting element columns identified."))
+print(range_cols)
+dat <- data.table::melt.data.table(data.table::data.table(promoters_all),
+                            variable.name = "interaction_type",
+                            measure.vars = range_cols) %>% 
+  tidyr::separate(col = "value", sep =",|, ", into=paste0("range",1:200))
+non_na_cols <- colnames(dat)[colSums(!is.na(dat))>0]
+
+promoter_interactions <- dat %>% 
+  dplyr::select(non_na_cols) %>%
+  data.table::melt.data.table(measure.vars = grep("^range",colnames(.), value = T)
+                              ) %>%
+  subset(!is.na(value) & (value!="")) %>%
+  tidyr::separate(col = "value", sep="[:]|-", into=c("CHR","START","END")) %>%
+  tidyr::separate(col = "interaction_type", sep="_", into=c("Marker","Element","Assay"),remove = F) %>%
+  dplyr::mutate(START=as.numeric(START), END=as.numeric(END),
+                peak_coordinates=paste0(Chr,":",Start,"-",End)) %>%
+  dplyr::select(-Chr,-Start,-End) %>%
+  subset(END>=START)
+
+gr.anchor_bins <- GenomicRanges::makeGRangesFromDataFrame(promoter_interactions, 
+                                        seqnames.field = "CHR", 
+                                        start.field = "START", 
+                                        end.field = "END", 
+                                        keep.extra.columns = T)
+### Convert markers to Celltypes
+cell_dict <- list(neurons="NeuN",
+                    microglia="PU1",
+                    oligo="Olig2",
+                    astrocytes="LHX2",
+                    periph="peripheral PU1+")
+cell_dict_invert <- setNames(names(cell_dict), cell_dict)
+gr.anchor_bins$Cell_type_anchor <- cell_dict_invert[gr.anchor_bins$Marker]
+### IMPORTANT!: Return the gr.hits object, not the gr.anchor_bins objects
+gr.overlap2 <- GRanges_overlap(gr.anchor_bins[,c("Cell_type_anchor","interaction_type","Element","Gene Name","PeakID","Distance to TSS","Nearest PromoterID","Annotation","Detailed Annotation")],
+                                             gr.hits[,c("dataset","Locus","SNP","Support","Consensus_SNP","Cell_type","Assay")], 
+                                             return_merged = T) %>%
+  clean_granges() %>%
+  subset(Cell_type==Cell_type_anchor)
+## Remove rows that disagree between annotations
+# gr.overlap2 <- subset(gr.overlap2, !(Element=="promoters") & (Element.1!="promoter"))
+# gr.overlap2$Element_old <- gr.overlap2$Element
+# gr.overlap2$Element  <- gr.overlap2$Element.1
+# gr.overlap2$Assay <- "interactome_anchor_bin"
 ```
 
-Let's instead ask what the top colocalized gene in the APOE locus is per study.
 
-Using this approach, the top eQTL gene is FKRP.
+### Nominate genes  
 
-```{r}
-coloc_res <- data.table::fread(here::here("data/MiGA/all_COLOC_results.Microglia_all_regions.snp-level.leadSNP.tsv.gz"))
-top_coloc <- subset(coloc_res, Study %in% AD_studies & Locus=="APOE") %>%
-  dplyr::group_by(Study, Locus) %>%
-  dplyr::slice_max(SNP.PP.H4, n = 1)
-createDT(top_coloc)
-```
+Nominate causal genes based on the overlap between fine-mapped variants, active regulatory elements, and interactome data.
 
-## CatalogueR
+For robust variant nomination, we find the intersection between the following groups:  
 
-Microglia do seem to be quite important in AD, but the microglia-specific QTL studies are currently available are underpowered. Let's take a different strategy and query the eQTL Catalogue via catalogueR.
+1. Fine-mapped Consensus SNP AD GWAS variants in the APOE locus (from **echolocatoR**).
+2. Coordinates of individual cell-type-specific enhancers/promoters (Table S5 tab 1).
+3. Coordinates of clusters of enhancers/superenhancers/promoters (Table S5 tab 1).
+4. Coordinates of individual cell-type-specific interactome anchors (Table S5 tabs 5-12).
+5. Coordinates of individual promoters/promoter-TSS/TSS/introns with PLAC-seq interactions (Table S5 tab 1). 
 
-```{r, message=F}
-library(catalogueR)
-```
+Table S5 comes from the supplementary material in [Nott et al. 2019](https://science.sciencemag.org/content/366/6469/1134.abstract). 
 
-### Jansen_2018
-
-```{r, eval=F}
-gwas.qtl_paths.Jansen_2018 <- catalogueR::eQTL_Catalogue.query(sumstats_paths = local_finemap[1], 
-                                 output_dir = "data/catalogueR_queries_Jansen_2018", 
-                                 split_files = T,
-                                 qtl_search = c("brain","monocyte","macrophage"),
-                                 conda_env ="echoR", 
-                                 nThread = 10)
-```
-
-### Marioni_2018
-
-```{r, eval=F}
-
-gwas.qtl_paths.Marioni_2018 <- catalogueR::eQTL_Catalogue.query(sumstats_paths = local_finemap[2], 
-                                 output_dir = "data/catalogueR_queries_Marioni_2018", 
-                                 split_files = T,
-                                 qtl_search = c("brain","monocyte","macrophage"),
-                                 conda_env ="echoR", 
-                                 force_new_subset = F,
-                                 nThread = 10)
-```
-
-## Run coloc
-
-#### Get sample sizes
-
-```{r}
-local_meta <- "data/GWAS-QTL_data_dictionary.xlsx"
-if(!file.exists(local_meta)){
-  download.file("https://github.com/RajLabMSSM/Fine_Mapping_Shiny/raw/master/www/metadata/GWAS-QTL_data_dictionary.xlsx",destfile = local_meta)
-}
-meta2 <- xlsx::read.xlsx2(here::here("data/GWAS-QTL_data_dictionary.xlsx"), sheetName = "GWAS")
-meta2$N <- as.numeric(meta2$N)
-```
-
-### Jansen_2018
-
-```{r, eval=F}
-# Gather paths
-gwas.qtl_paths.Jansen_2018 <- list.files("data/catalogueR_queries_Jansen_2018/",
-                                         pattern = ".tsv.gz",
-                                         recursive = T, full.names = T) 
-
-coloc_QTLs.Jansen_2018 <- catalogueR::run_coloc(gwas.qtl_paths = gwas.qtl_paths.Jansen_2018, 
-                      save_path = "data/catalogueR_queries_Jansen_2018/coloc.Jansen_2018.tsv.gz", 
-                      gwas_sample_size = subset(meta2, dataset=="Jansen_2018")$N,
-                      nThread = 10)
-```
-
-### Marioni_2018
-
-```{r, eval=F}
-# Gather paths
-gwas.qtl_paths.Marioni_2018 <- list.files("data/catalogueR_queries_Marioni_2018/",
-                                         pattern = ".tsv.gz",
-                                         recursive = T, full.names = T) 
-
-coloc_QTLs.Marioni_2018 <- catalogueR::run_coloc(gwas.qtl_paths = gwas.qtl_paths.Marioni_2018, 
-                      save_path = "data/catalogueR_queries_Marioni_2018/coloc.Jansen_2018.tsv.gz", 
-                      gwas_sample_size = subset(meta2, dataset=="Marioni_2018")$N,
-                      nThread = 10)
- 
-```
-
-### Merge results
-
-```{r}
-coloc_QTLs.Jansen_2018 <- data.table::fread(here::here("data/catalogueR_queries_Jansen_2018/coloc.Jansen_2018.tsv.gz"), nThread = 10)
-coloc_QTLs.Marioni_2018 <- data.table::fread(here::here("data/catalogueR_queries_Marioni_2018/coloc.Marioni_2018.tsv.gz"), nThread = 10)
-
-coloc_res <- rbind(cbind(dataset="Jansen_2018",
-                         coloc_QTLs.Jansen_2018),
-                   cbind(dataset="Marioni_2018",
-                         coloc_QTLs.Marioni_2018), fill=T)
-
-top_coloc <- coloc_res %>% 
-   dplyr::select(dataset, Locus.GWAS, PP.H4, snp, SNP.PP.H4, qtl_id, gene.QTL) %>%
+```{r} 
+# gr.top_hits <- GRanges_overlap(gr.anchor_bins, gr.promoters)
+gr.anchors$Cell_type_interactome <- gr.anchors$Cell_type
+interactome_cols <- c("count","fdr","ClusterSize","ClusterType","ClusterNegLog10P",
+                      "Cell_type_interactome","Anchor")
+gr.overlap <- GRanges_overlap(gr.anchors[,interactome_cols],
+                              c(gr.overlap1, gr.overlap2),
+                              return_merged = T) %>%
   unique() %>%
-  subset(PP.H4>0.5) %>%
-  dplyr::group_by(dataset, Locus.GWAS, snp) %>% 
-  dplyr::slice_max(order_by = PP.H4, n=3 )
-createDT(top_coloc)
+  # Make sure the data overlaps with a celltype in the interactome
+  subset(!is.na(Cell_type_interactome)) %>%
+  # make sure celltypes are matching
+  subset(Cell_type==Cell_type_interactome)
+
+
+regulatory_overlap <- data.frame(gr.overlap) %>% 
+  # subset(Consensus_SNP==T) %>%
+   dplyr::select(all_of(c("dataset", "Locus","SNP","Support", "Gene.Name",
+                 "Assay","Element","Cell_type", interactome_cols,
+                 "Annotation","PeakID","Distance.to.TSS"
+                  # grep("promoter|enhancer|interactions",
+                  #      colnames(gr.overlap@elementMetadata), value = T)
+                  )), -Cell_type_interactome
+                )  %>%
+  tidyr::separate(col="Locus", into = c("Locus"), sep = "_", extra = "drop") %>%
+  unique() %>%
+  # dplyr::arrange(desc(ClusterNegLog10P), ClusterSize) %>%
+  # dplyr::group_by(dataset, Locus, SNP, Cell_type, Element) %>%
+  # dplyr::slice_max(order_by = "count", n=1, with_ties = T) %>%
+  # dplyr::slice_head() %>%
+  dplyr::arrange(desc(Support)) %>%
+  dplyr::mutate(Assay=gsub("promoters|enhancers","called_elements", Assay)) %>%
+  subset(Support>2) %>%
+  data.table::data.table()
+
+
+createDT(regulatory_overlap)
+# regulatory_overlap
 ```
-
-# Fine-mapped QTLs
-
-The eQTL Catalogue team recently fine-mapped their entire database (using the tool FINEMAP). We can check for overlap between causal variants here.
-
-Problem : None of the Consensus or Support\>0 SNPs seem to be present in the eQTL Catalogue fine-mapping data (filtering choices before fine-mapping?). Thus, this approach isn't very helpful in this case.
-
-```{r message=F}
-library(GenomicRanges)
-```
-
-```{r}
-ftp_path <- file.path("ftp://ftp.ebi.ac.uk/pub/databases/spot/eQTL/credible_sets",
-                      "BLUEPRINT_SE.monocyte_ge.purity_filtered.txt.gz"
-          # "GTEx.brain_cortex_ge.purity_filtered.txt.gz"
-          )
-ftp_cs <- data.table::fread(ftp_path, nThread = 10)
-gr.cs <- subset(ftp_cs, pip>0) %>%
-  GenomicRanges::makeGRangesFromDataFrame(keep.extra.columns = T, 
-                                          seqnames.field = "chr", 
-                                          start.field = "pos", end.field = "pos") 
-# catalogueR:::rsids_from_coords(gr.cs, genome_build = "hg38")
-gr.finemap <- catalogueR::liftover(gwas_data = finemap_dat,
-                                     build.conversion = "hg19.to.hg38")
-suppressWarnings(GenomeInfoDb::seqlevelsStyle(gr.finemap) <- "NCBI")
-
-
-#### Find any eQTL Catalogue CS within the range ####
-gr.range <- subset(gr.cs, 
-       (seqnames(gr.cs)==19) & 
-       (start(gr.cs)>=min(start(gr.finemap))) &
-       (end(gr.cs)<=max(start(gr.finemap))))
-gene_dict <- catalogueR::ensembl_to_hgnc(gr.range$phenotype_id)
-gr.range$gene <- gene_dict[gr.range$phenotype_id]
-
-
-#### Find overlap in causal SNPs ####
-gr.hits <- echolocatoR::GRanges_overlap(gr.finemap, gr.cs)
-gene_dict <- catalogueR::ensembl_to_hgnc(gr.hits$phenotype_id)
-gr.hits$gene <- gene_dict[gr.hits$phenotype_id]
-```
-
-# Summarise
-
--   Merge the nominated cell-types (from epigenomic overlap) with the nominated genes (from colocalization) by SNPs.
-
--   Top candidates:
-
-    -   Cell-type: microglia
-
-    -   Gene: FOSB
-
-    -   SNP: rs11556505
-
--   [rs11556505](https://www.snpedia.com/index.php/Rs11556505) has previously been linked to AD and hippocampal degradation.
-
--   This SNP falls within an exon of [TOMM40](https://www.ncbi.nlm.nih.gov/snp/rs11556505), which is a gene immediately next to APOE.
-
--   Colocalization analyses nominated FOSB instead, which is \~500Mb+ downstream of TOMM40.
-
--   and was shown to be somewhat correlated with HC volume and free-recall memory in humans. However they attributed the effect of rs11556505 to TOMM40.
-
-    > The influence of APOE and TOMM40 polymorphisms on hippocampal volume and episodic memory in old age, <https://www.frontiersin.org/articles/10.3389/fnhum.2013.00198/full>
-
-```{r}
-candidates <- merge(snp_overlap_counts,  
-                    top_coloc,  
-                    all.y = T,
-                    by.x = "SNP", by.y = "snp")
-createDT(candidates) 
-```
+ 
 
 # Session info
 
+<details> 
+
 ```{r Session Info, attr.output='style="max-height: 400px;"'}
-sessioninfo::session_info()
+utils::sessionInfo()
 ```
+
+</details> 
