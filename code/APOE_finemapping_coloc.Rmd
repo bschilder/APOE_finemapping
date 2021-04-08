@@ -193,7 +193,7 @@ top_coloc <- coloc_res %>%
   subset(PP.H4>0.5) %>%
   dplyr::group_by(dataset, Locus.GWAS, snp) %>% 
   dplyr::slice_max(order_by = PP.H4, n=3 )
-createDT(top_coloc)
+# createDT(top_coloc)
 ```
 
 # Fine-mapped QTLs
@@ -239,8 +239,6 @@ gr.hits$gene <- gene_dict[gr.hits$phenotype_id]
 
 # Summarise
 
--   Merge the nominated cell-types (from epigenomic overlap) with the nominated genes (from colocalization) by SNPs.
-
 -   Top candidates:
 
     -   Cell-type: microglia
@@ -260,15 +258,21 @@ gr.hits$gene <- gene_dict[gr.hits$phenotype_id]
     > The influence of APOE and TOMM40 polymorphisms on hippocampal volume and episodic memory in old age, <https://www.frontiersin.org/articles/10.3389/fnhum.2013.00198/full>
 
 ```{r}
-candidates <- merge(snp_overlap_counts,  
-                    top_coloc,  
-                    all.y = T,
-                    by.x = "SNP", by.y = "snp")
-createDT(candidates) 
+# -   Merge the nominated cell-types (from epigenomic overlap) with the nominated genes (from colocalization) by SNPs.
+# candidates <- merge(snp_overlap_counts,  
+#                     top_coloc,  
+#                     all.y = T,
+#                     by.x = "SNP", by.y = "snp")
+createDT(top_coloc) 
 ```
+
 
 # Session info
 
+<details> 
+
 ```{r Session Info, attr.output='style="max-height: 400px;"'}
-sessioninfo::session_info()
+utils::sessionInfo()
 ```
+
+</details> 
